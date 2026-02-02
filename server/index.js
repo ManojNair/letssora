@@ -1,9 +1,15 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { DefaultAzureCredential } from '@azure/identity';
+import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -12,19 +18,28 @@ const PORT = process.env.PORT || 3001;
 const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || 'https://letssoraprj-resource.openai.azure.com';
 const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || 'https://letssoraprj-resource.services.ai.azure.com';
 const SORA_MODEL = process.env.SORA_MODEL_DEPLOYMENT || 'sora-2';
-const FLUX_MODEL = process.env.FLUX_MODEL_DEPLOYMENT || 'flux-2-pro';
+const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1';
 
 // Initialize Azure credential
 const credential = new DefaultAzureCredential();
-
-app.use(cors());
-app.use(express.json());
 
 // Helper function to get Azure AD token
 async function getAzureToken() {
   const tokenResponse = await credential.getToken('https://cognitiveservices.azure.com/.default');
   return tokenResponse.token;
 }
+
+// Create OpenAI client dynamically with fresh token
+async function getOpenAIClient() {
+  const token = await getAzureToken();
+  return new OpenAI({
+    baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
+    apiKey: token
+  });
+}
+
+app.use(cors());
+app.use(express.json());
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -37,12 +52,12 @@ app.get('/api/health', (req, res) => {
     },
     models: {
       video: SORA_MODEL,
-      image: FLUX_MODEL
+      image: IMAGE_MODEL
     }
   });
 });
 
-// Generate image endpoint (Flux 2 Pro)
+// Generate image endpoint (GPT Image 1)
 app.post('/api/generate-image', async (req, res) => {
   try {
     const { prompt, size = '1024x1024' } = req.body;
@@ -52,74 +67,27 @@ app.post('/api/generate-image', async (req, res) => {
     }
 
     console.log(`Generating image with prompt: "${prompt}"`);
-    console.log(`Image size: ${size}, Model: ${FLUX_MODEL}`);
+    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}`);
 
-    // Get Azure AD token
-    const token = await getAzureToken();
+    // Get OpenAI client with fresh token
+    const openai = await getOpenAIClient();
 
-    // Azure AI Foundry Flux API endpoint - using Black Forest Labs provider path
-    // Per docs: https://github.com/microsoft-foundry/foundry-samples/blob/main/samples/python/black-forest-labs/flux/README.md
-    const apiVersion = "preview";
-    const apiUrl = `${AZURE_FOUNDRY_ENDPOINT}/providers/blackforestlabs/v1/flux-2-pro?api-version=${apiVersion}`;
-    console.log(`Calling API: ${apiUrl}`);
-
-    // Create abort controller with 3-minute timeout (image generation can take a while)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes
-
-    // Call Azure Foundry Flux API with correct parameters
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        prompt,
-        n: 1,
-        width: parseInt(size.split('x')[0]),
-        height: parseInt(size.split('x')[1]),
-        output_format: 'png',
-        model: FLUX_MODEL.toLowerCase()  // Model name must be lowercase per docs
-      }),
-      signal: controller.signal
+    // Use OpenAI SDK for GPT Image 1
+    const result = await openai.images.generate({
+      model: IMAGE_MODEL,
+      prompt: prompt,
+      size: size,
+      n: 1,
     });
 
-    clearTimeout(timeoutId);
-
-    console.log(`Response status: ${response.status}`);
-    const responseText = await response.text();
-    console.log(`Response length: ${responseText.length} chars`);
-
-    if (!response.ok) {
-      console.error('Azure OpenAI Image Error:', responseText);
-      return res.status(response.status).json({ 
-        error: 'Failed to generate image', 
-        details: responseText 
-      });
-    }
-
-    // Parse JSON from text
-    let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch (parseError) {
-      console.error('JSON parse error:', parseError);
-      console.error('Raw response:', responseText.substring(0, 500));
-      return res.status(500).json({ 
-        error: 'Invalid JSON response from API', 
-        details: responseText.substring(0, 200) 
-      });
-    }
-
-    console.log('Image generation response received, keys:', Object.keys(data));
+    console.log('Image generation response received');
 
     res.json({
       status: 'completed',
       type: 'image',
-      data: data.data?.[0]?.b64_json,
-      revised_prompt: data.data?.[0]?.revised_prompt,
-      _raw: data
+      data: result.data?.[0]?.b64_json,
+      revised_prompt: result.data?.[0]?.revised_prompt,
+      _raw: result
     });
   } catch (error) {
     console.error('Error generating image:', error);
@@ -372,10 +340,39 @@ app.post('/api/save-video', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+// Serve static files from the React app in production
+if (process.env.NODE_ENV === 'production') {
+  const clientDistPath = path.join(__dirname, '..', 'client', 'dist');
+  app.use(express.static(clientDistPath));
+  
+  // Handle React routing - serve index.html for all non-API routes
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+}
+
+const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`📍 Azure OpenAI Endpoint: ${AZURE_OPENAI_ENDPOINT}`);
   console.log(`📍 Azure Foundry Endpoint: ${AZURE_FOUNDRY_ENDPOINT}`);
   console.log(`🎬 Sora Model: ${SORA_MODEL}`);
-  console.log(`🖼️  Flux Model: ${FLUX_MODEL}`);
+  console.log(`🖼️  Image Model: ${IMAGE_MODEL}`);
 });
+
+// Graceful shutdown for Azure Container Apps
+const gracefulShutdown = (signal) => {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  server.close(() => {
+    console.log('HTTP server closed.');
+    process.exit(0);
+  });
+
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
