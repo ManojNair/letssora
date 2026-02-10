@@ -15,8 +15,8 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Azure OpenAI configuration
-const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT;
-const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT;
+const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || 'https://letssoraprj-resource.openai.azure.com';
+const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || 'https://letssoraprj-resource.services.ai.azure.com';
 const SORA_MODEL = process.env.SORA_MODEL_DEPLOYMENT || 'sora-2';
 const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1';
 
