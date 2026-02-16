@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { DefaultAzureCredential } from '@azure/identity';
+// import { DefaultAzureCredential } from '@azure/identity';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
@@ -19,24 +19,31 @@ const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT;
 const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT;
 const SORA_MODEL = process.env.SORA_MODEL_DEPLOYMENT || 'sora-2';
 const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1';
+const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY;
 
 // Initialize Azure credential
-const credential = new DefaultAzureCredential();
+// const credential = new DefaultAzureCredential();
 
 // Helper function to get Azure AD token
-async function getAzureToken() {
-  const tokenResponse = await credential.getToken('https://cognitiveservices.azure.com/.default');
-  return tokenResponse.token;
-}
+// async function getAzureToken() {
+//   const tokenResponse = await credential.getToken('https://cognitiveservices.azure.com/.default');
+//   return tokenResponse.token;
+// }
 
 // Create OpenAI client dynamically with fresh token
-async function getOpenAIClient() {
-  const token = await getAzureToken();
-  return new OpenAI({
-    baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
-    apiKey: token
-  });
-}
+// async function getOpenAIClient() {
+//   const token = await getAzureToken();
+//   return new OpenAI({
+//     baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
+//     apiKey: token
+//   });
+// }
+
+// Create OpenAI client with API key
+const openai = new OpenAI({
+  baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
+  apiKey: AZURE_OPENAI_API_KEY
+});
 
 app.use(cors());
 app.use(express.json());
@@ -69,8 +76,7 @@ app.post('/api/generate-image', async (req, res) => {
     console.log(`Generating image with prompt: "${prompt}"`);
     console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}`);
 
-    // Get OpenAI client with fresh token
-    const openai = await getOpenAIClient();
+    // Use OpenAI client with API key
 
     // Use OpenAI SDK for GPT Image 1
     const result = await openai.images.generate({
@@ -109,15 +115,12 @@ app.post('/api/generate-video', async (req, res) => {
 
     console.log(`Generating video with prompt: "${prompt}"`);
 
-    // Get Azure AD token
-    const token = await getAzureToken();
-
     // Call Azure OpenAI Sora API
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+        'api-key': AZURE_OPENAI_API_KEY
       },
       body: JSON.stringify({
         prompt,
@@ -157,12 +160,11 @@ app.post('/api/generate-video', async (req, res) => {
 app.get('/api/video-status/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const token = await getAzureToken();
 
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${token}`
+        'api-key': AZURE_OPENAI_API_KEY
       }
     });
 
@@ -184,7 +186,7 @@ app.get('/api/video-status/:id', async (req, res) => {
         const generationsResponse = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}/content`, {
           method: 'GET',
           headers: {
-            'Authorization': `Bearer ${token}`
+            'api-key': AZURE_OPENAI_API_KEY
           }
         });
         
@@ -224,12 +226,11 @@ app.get('/api/video-status/:id', async (req, res) => {
 app.get('/api/video-content/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const token = await getAzureToken();
 
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}/content`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${token}`
+        'api-key': AZURE_OPENAI_API_KEY
       }
     });
 
@@ -274,13 +275,12 @@ app.get('/api/download-video', async (req, res) => {
     // First try without auth (for SAS URLs or public URLs)
     let response = await fetch(url);
     
-    // If unauthorized, try with Azure token
+    // If unauthorized, try with API key
     if (response.status === 401 || response.status === 403) {
-      console.log('Trying with Azure token...');
-      const token = await getAzureToken();
+      console.log('Trying with API key...');
       response = await fetch(url, {
         headers: {
-          'Authorization': `Bearer ${token}`
+          'api-key': AZURE_OPENAI_API_KEY
         }
       });
     }
