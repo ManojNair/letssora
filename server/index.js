@@ -2,8 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-// import { DefaultAzureCredential } from '@azure/identity';
-import OpenAI from 'openai';
+import { DefaultAzureCredential } from '@azure/identity';
+import OpenAI, { toFile } from 'openai';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -18,17 +18,17 @@ const PORT = process.env.PORT || 3001;
 const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT;
 const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT;
 const SORA_MODEL = process.env.SORA_MODEL_DEPLOYMENT || 'sora-2';
-const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1';
+const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1.5';
 const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY;
 
 // Initialize Azure credential
-// const credential = new DefaultAzureCredential();
+const credential = new DefaultAzureCredential();
 
 // Helper function to get Azure AD token
-// async function getAzureToken() {
-//   const tokenResponse = await credential.getToken('https://cognitiveservices.azure.com/.default');
-//   return tokenResponse.token;
-// }
+async function getAzureToken() {
+  const tokenResponse = await credential.getToken('https://cognitiveservices.azure.com/.default');
+  return tokenResponse.token;
+}
 
 // Create OpenAI client dynamically with fresh token
 // async function getOpenAIClient() {
@@ -42,11 +42,11 @@ const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY;
 // Create OpenAI client with API key
 const openai = new OpenAI({
   baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
-  apiKey: AZURE_OPENAI_API_KEY
+  apiKey: await getAzureToken()
 });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -64,27 +64,46 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Generate image endpoint (GPT Image 1)
+// Generate image endpoint (Image API)
 app.post('/api/generate-image', async (req, res) => {
   try {
-    const { prompt, size = '1024x1024' } = req.body;
+    const { prompt, size = 'auto', quality = 'auto', inputImage } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
 
     console.log(`Generating image with prompt: "${prompt}"`);
-    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}`);
+    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}, Has input image: ${!!inputImage}`);
 
-    // Use OpenAI client with API key
+    let result;
 
-    // Use OpenAI SDK for GPT Image 1
-    const result = await openai.images.generate({
-      model: IMAGE_MODEL,
-      prompt: prompt,
-      size: size,
-      n: 1,
-    });
+    if (inputImage) {
+      // Use images.edit when a reference image is provided
+      // Extract base64 data from data URL
+      const base64Data = inputImage.startsWith('data:')
+        ? inputImage.split(',')[1]
+        : inputImage;
+      const imageBuffer = Buffer.from(base64Data, 'base64');
+      const imageFile = await toFile(imageBuffer, 'reference.png', { type: 'image/png' });
+
+      result = await openai.images.edit({
+        model: IMAGE_MODEL,
+        image: imageFile,
+        prompt: prompt,
+        ...(size !== 'auto' && { size }),
+        quality,
+      });
+    } else {
+      // Use images.generate for text-only prompts
+      result = await openai.images.generate({
+        model: IMAGE_MODEL,
+        prompt: prompt,
+        ...(size !== 'auto' && { size }),
+        quality,
+        n: 1,
+      });
+    }
 
     console.log('Image generation response received');
 
@@ -97,6 +116,54 @@ app.post('/api/generate-image', async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating image:', error);
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    });
+  }
+});
+
+// Edit/refine image endpoint (Image API - images.edit)
+app.post('/api/refine-image', async (req, res) => {
+  try {
+    const { prompt, previousImage, size = 'auto', quality = 'auto' } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+
+    if (!previousImage) {
+      return res.status(400).json({ error: 'Previous image data is required for refinement' });
+    }
+
+    console.log(`Refining image with prompt: "${prompt}"`);
+
+    // Convert base64 to file for the edit API
+    const base64Data = previousImage.startsWith('data:')
+      ? previousImage.split(',')[1]
+      : previousImage;
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+    const imageFile = await toFile(imageBuffer, 'source.png', { type: 'image/png' });
+
+    const result = await openai.images.edit({
+      model: IMAGE_MODEL,
+      image: imageFile,
+      prompt: prompt,
+      ...(size !== 'auto' && { size }),
+      quality,
+    });
+
+    console.log('Image refinement response received');
+
+    res.json({
+      status: 'completed',
+      type: 'image',
+      data: result.data?.[0]?.b64_json,
+      revised_prompt: result.data?.[0]?.revised_prompt,
+      _raw: result
+    });
+  } catch (error) {
+    console.error('Error refining image:', error);
     res.status(500).json({ 
       error: 'Internal server error', 
       message: error.message 
