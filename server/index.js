@@ -55,35 +55,42 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Helper: convert a base64 or data-URL string to a File object for the edit API
+async function base64ToFile(input, filename = 'image.png') {
+  const base64Data = input.startsWith('data:') ? input.split(',')[1] : input;
+  const imageBuffer = Buffer.from(base64Data, 'base64');
+  return toFile(imageBuffer, filename, { type: 'image/png' });
+}
+
 // Generate image endpoint (Image API)
 app.post('/api/generate-image', async (req, res) => {
   try {
-    const { prompt, size = 'auto', quality = 'auto', inputImage } = req.body;
+    const { prompt, size = 'auto', quality = 'auto', inputImages } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
 
+    const imageCount = Array.isArray(inputImages) ? inputImages.length : 0;
     console.log(`Generating image with prompt: "${prompt}"`);
-    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}, Has input image: ${!!inputImage}`);
+    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}, Reference images: ${imageCount}`);
 
     let result;
 
-    if (inputImage) {
-      // Use images.edit when a reference image is provided
-      // Extract base64 data from data URL
-      const base64Data = inputImage.startsWith('data:')
-        ? inputImage.split(',')[1]
-        : inputImage;
-      const imageBuffer = Buffer.from(base64Data, 'base64');
-      const imageFile = await toFile(imageBuffer, 'reference.png', { type: 'image/png' });
+    if (inputImages && inputImages.length > 0) {
+      // Use images.edit when reference images are provided
+      // Convert all images to File objects
+      const imageFiles = await Promise.all(
+        inputImages.map((img, i) => base64ToFile(img, `reference-${i}.png`))
+      );
 
       result = await openai.images.edit({
         model: IMAGE_MODEL,
-        image: imageFile,
+        image: imageFiles.length === 1 ? imageFiles[0] : imageFiles,
         prompt: prompt,
         ...(size !== 'auto' && { size }),
         quality,
+        input_fidelity: 'high',
       });
     } else {
       // Use images.generate for text-only prompts
@@ -129,19 +136,16 @@ app.post('/api/refine-image', async (req, res) => {
 
     console.log(`Refining image with prompt: "${prompt}"`);
 
-    // Convert base64 to file for the edit API
-    const base64Data = previousImage.startsWith('data:')
-      ? previousImage.split(',')[1]
-      : previousImage;
-    const imageBuffer = Buffer.from(base64Data, 'base64');
-    const imageFile = await toFile(imageBuffer, 'source.png', { type: 'image/png' });
+    // Convert the previous image to a file
+    const sourceFile = await base64ToFile(previousImage, 'source.png');
 
     const result = await openai.images.edit({
       model: IMAGE_MODEL,
-      image: imageFile,
+      image: sourceFile,
       prompt: prompt,
       ...(size !== 'auto' && { size }),
       quality,
+      input_fidelity: "high"
     });
 
     console.log('Image refinement response received');

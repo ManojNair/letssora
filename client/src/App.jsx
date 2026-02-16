@@ -90,7 +90,7 @@ function App() {
   const [status, setStatus] = useState('idle'); // idle, generating, polling, completed, error
   const [showSettings, setShowSettings] = useState(false);
   const [pollCount, setPollCount] = useState(0);
-  const [groundingImage, setGroundingImage] = useState(null);
+  const [groundingImages, setGroundingImages] = useState([]);
   const [refinePrompt, setRefinePrompt] = useState('');
   const [isRefining, setIsRefining] = useState(false);
 
@@ -155,7 +155,7 @@ function App() {
           body: JSON.stringify({
             prompt: prompt.trim(),
             size: imageSize,
-            inputImage: groundingImage || undefined,
+            inputImages: groundingImages.length > 0 ? groundingImages : undefined,
           }),
         });
 
@@ -307,17 +307,25 @@ function App() {
   };
 
   const handleImageUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setGroundingImage(reader.result);
-    };
-    reader.readAsDataURL(file);
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setGroundingImages((prev) => [...prev, reader.result]);
+      };
+      reader.readAsDataURL(file);
+    });
+    // Reset input so the same file can be re-selected
+    e.target.value = '';
   };
 
-  const clearGroundingImage = () => {
-    setGroundingImage(null);
+  const removeGroundingImage = (index) => {
+    setGroundingImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const clearAllGroundingImages = () => {
+    setGroundingImages([]);
   };
 
   const handleRefine = async () => {
@@ -461,7 +469,7 @@ function App() {
           <p className="text-gray-400 text-lg max-w-2xl mx-auto">
             {generationMode === 'video' 
               ? 'Harness the power of Sora 2 to generate stunning videos from text descriptions.'
-              : 'Create and refine images with the Responses API. Upload a reference or start from scratch.'}
+              : 'Create and refine images with GPT Image. Upload references or start from scratch.'}
             {' '}Just describe your vision, and watch it come to life.
           </p>
         </motion.div>
@@ -528,28 +536,48 @@ function App() {
             <div className="mb-6">
               <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
                 <Upload className="w-4 h-4 text-blue-400" />
-                Reference Image (Optional)
+                Reference Images (Optional)
               </label>
               <p className="text-xs text-gray-500 mb-3">
-                Upload an image to use as a starting point. The AI will generate new versions based on it.
+                Upload one or more images as references. The AI will use them with high input fidelity to generate a new image. The first image gets the highest fidelity.
               </p>
-              {groundingImage ? (
-                <div className="relative inline-block">
-                  <img src={groundingImage} alt="Reference" className="max-h-48 rounded-xl border border-white/10" />
-                  <button 
-                    onClick={clearGroundingImage} 
-                    className="absolute top-2 right-2 p-1.5 bg-black/70 rounded-full hover:bg-red-500/80 transition-colors"
-                    disabled={isGenerating || status === 'polling'}
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+              {groundingImages.length > 0 && (
+                <div className="mb-3">
+                  <div className="flex flex-wrap gap-3">
+                    {groundingImages.map((img, index) => (
+                      <div key={index} className="relative inline-block">
+                        <img src={img} alt={`Reference ${index + 1}`} className="h-32 w-auto rounded-xl border border-white/10 object-cover" />
+                        <button 
+                          onClick={() => removeGroundingImage(index)} 
+                          className="absolute top-1.5 right-1.5 p-1 bg-black/70 rounded-full hover:bg-red-500/80 transition-colors"
+                          disabled={isGenerating || status === 'polling'}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                        {index === 0 && (
+                          <span className="absolute bottom-1.5 left-1.5 text-[10px] bg-violet-500/80 text-white px-1.5 py-0.5 rounded-md">Primary</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <label className="inline-flex items-center gap-1.5 text-xs text-violet-400 cursor-pointer hover:text-violet-300 transition-colors">
+                      <Upload className="w-3 h-3" />
+                      Add more
+                      <input type="file" accept="image/*" multiple onChange={handleImageUpload} className="hidden" disabled={isGenerating || status === 'polling'} />
+                    </label>
+                    <button onClick={clearAllGroundingImages} className="text-xs text-red-400 hover:text-red-300 transition-colors" disabled={isGenerating || status === 'polling'}>
+                      Clear all
+                    </button>
+                  </div>
                 </div>
-              ) : (
+              )}
+              {groundingImages.length === 0 && (
                 <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-white/20 rounded-xl cursor-pointer hover:border-violet-500/50 transition-colors bg-black/20">
                   <Upload className="w-8 h-8 text-gray-500 mb-2" />
-                  <span className="text-sm text-gray-500">Click to upload a reference image</span>
-                  <span className="text-xs text-gray-600 mt-1">PNG, JPG, WEBP up to 50MB</span>
-                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" disabled={isGenerating || status === 'polling'} />
+                  <span className="text-sm text-gray-500">Click to upload reference images</span>
+                  <span className="text-xs text-gray-600 mt-1">PNG, JPG, WEBP up to 50MB • Multiple files supported</span>
+                  <input type="file" accept="image/*" multiple onChange={handleImageUpload} className="hidden" disabled={isGenerating || status === 'polling'} />
                 </label>
               )}
             </div>
@@ -650,7 +678,7 @@ function App() {
                     <div className="flex items-center">
                       <div className="p-4 bg-violet-500/10 rounded-xl border border-violet-500/20">
                         <p className="text-sm text-violet-300">
-                          <span className="font-medium">Responses API</span> with GPT Image supports multi-turn refinement. Upload a reference and iterate!
+                          <span className="font-medium">Image API</span> with GPT Image supports multiple reference images with high input fidelity. Upload references and iterate!
                         </p>
                       </div>
                     </div>
@@ -832,7 +860,7 @@ function App() {
               {/* Image Info */}
               <div className="mt-4 pt-4 border-t border-white/10 text-sm text-gray-400">
                 <p><span className="text-gray-500">Prompt:</span> {prompt}</p>
-                <p className="mt-1"><span className="text-gray-500">Size:</span> {imageSize} • <span className="text-gray-500">Model:</span> Responses API (GPT Image)</p>
+                <p className="mt-1"><span className="text-gray-500">Size:</span> {imageSize} • <span className="text-gray-500">Model:</span> Image API (GPT Image)</p>
                 {imageData?.revised_prompt && (
                   <p className="mt-1"><span className="text-gray-500">Revised Prompt:</span> {imageData.revised_prompt}</p>
                 )}
