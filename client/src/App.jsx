@@ -13,7 +13,9 @@ import {
   CheckCircle2,
   RefreshCw,
   Image,
-  Film
+  Film,
+  Upload,
+  X
 } from 'lucide-react';
 
 // Particle background component
@@ -63,22 +65,23 @@ const durationOptions = [
 
 // Image size options
 const imageSizeOptions = [
+  { value: 'auto', label: 'Auto (Recommended)', icon: '✨' },
   { value: '1024x1024', label: 'Square (1024×1024)', icon: '⬜' },
-  { value: '1792x1024', label: 'Landscape (1792×1024)', icon: '🖥️' },
-  { value: '1024x1792', label: 'Portrait (1024×1792)', icon: '📱' },
+  { value: '1536x1024', label: 'Landscape (1536×1024)', icon: '🖥️' },
+  { value: '1024x1536', label: 'Portrait (1024×1536)', icon: '📱' },
 ];
 
 // Generation mode options
 const modeOptions = [
   { value: 'video', label: 'Video', icon: Film, model: 'Sora 2' },
-  { value: 'image', label: 'Image', icon: Image, model: 'GPT Image 1' },
+  { value: 'image', label: 'Image', icon: Image, model: 'GPT Image 1.5' },
 ];
 
 function App() {
   const [prompt, setPrompt] = useState('');
   const [generationMode, setGenerationMode] = useState('video'); // 'video' or 'image'
   const [size, setSize] = useState('720x1280');
-  const [imageSize, setImageSize] = useState('1024x1024');
+  const [imageSize, setImageSize] = useState('auto');
   const [seconds, setSeconds] = useState('4');
   const [isGenerating, setIsGenerating] = useState(false);
   const [videoData, setVideoData] = useState(null);
@@ -87,6 +90,9 @@ function App() {
   const [status, setStatus] = useState('idle'); // idle, generating, polling, completed, error
   const [showSettings, setShowSettings] = useState(false);
   const [pollCount, setPollCount] = useState(0);
+  const [groundingImage, setGroundingImage] = useState(null);
+  const [refinePrompt, setRefinePrompt] = useState('');
+  const [isRefining, setIsRefining] = useState(false);
 
   // Poll for video status
   useEffect(() => {
@@ -136,6 +142,7 @@ function App() {
     setImageData(null);
     setStatus('generating');
     setPollCount(0);
+    setRefinePrompt('');
 
     try {
       if (generationMode === 'image') {
@@ -148,6 +155,7 @@ function App() {
           body: JSON.stringify({
             prompt: prompt.trim(),
             size: imageSize,
+            inputImage: groundingImage || undefined,
           }),
         });
 
@@ -298,6 +306,59 @@ function App() {
     }
   };
 
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setGroundingImage(reader.result);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const clearGroundingImage = () => {
+    setGroundingImage(null);
+  };
+
+  const handleRefine = async () => {
+    if (!refinePrompt.trim() || !imageData?.data) return;
+    
+    setIsRefining(true);
+    setError(null);
+    
+    try {
+      const response = await fetch('/api/refine-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: refinePrompt.trim(),
+          previousImage: imageData.data,
+          size: imageSize,
+        }),
+      });
+      
+      let data;
+      const responseText = await response.text();
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch (parseError) {
+        throw new Error(`Invalid response: ${responseText.substring(0, 100)}`);
+      }
+      
+      if (!response.ok) {
+        throw new Error(data.error || data.details || 'Failed to refine image');
+      }
+      
+      console.log('Refine API Response:', data);
+      setImageData(data);
+      setRefinePrompt('');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
   const getImageUrl = () => {
     const base64Data = imageData?.data || imageData?.b64_json;
     if (base64Data) {
@@ -400,7 +461,7 @@ function App() {
           <p className="text-gray-400 text-lg max-w-2xl mx-auto">
             {generationMode === 'video' 
               ? 'Harness the power of Sora 2 to generate stunning videos from text descriptions.'
-              : 'Create beautiful images with GPT Image 1 from your imagination.'}
+              : 'Create and refine images with the Responses API. Upload a reference or start from scratch.'}
             {' '}Just describe your vision, and watch it come to life.
           </p>
         </motion.div>
@@ -461,6 +522,38 @@ function App() {
               disabled={isGenerating || status === 'polling'}
             />
           </div>
+
+          {/* Grounding Image Upload - Image Mode Only */}
+          {generationMode === 'image' && (
+            <div className="mb-6">
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
+                <Upload className="w-4 h-4 text-blue-400" />
+                Reference Image (Optional)
+              </label>
+              <p className="text-xs text-gray-500 mb-3">
+                Upload an image to use as a starting point. The AI will generate new versions based on it.
+              </p>
+              {groundingImage ? (
+                <div className="relative inline-block">
+                  <img src={groundingImage} alt="Reference" className="max-h-48 rounded-xl border border-white/10" />
+                  <button 
+                    onClick={clearGroundingImage} 
+                    className="absolute top-2 right-2 p-1.5 bg-black/70 rounded-full hover:bg-red-500/80 transition-colors"
+                    disabled={isGenerating || status === 'polling'}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-white/20 rounded-xl cursor-pointer hover:border-violet-500/50 transition-colors bg-black/20">
+                  <Upload className="w-8 h-8 text-gray-500 mb-2" />
+                  <span className="text-sm text-gray-500">Click to upload a reference image</span>
+                  <span className="text-xs text-gray-600 mt-1">PNG, JPG, WEBP up to 50MB</span>
+                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" disabled={isGenerating || status === 'polling'} />
+                </label>
+              )}
+            </div>
+          )}
 
           {/* Settings Toggle */}
           <button
@@ -557,7 +650,7 @@ function App() {
                     <div className="flex items-center">
                       <div className="p-4 bg-violet-500/10 rounded-xl border border-violet-500/20">
                         <p className="text-sm text-violet-300">
-                          <span className="font-medium">GPT Image 1</span> generates high-quality images instantly. No waiting required!
+                          <span className="font-medium">Responses API</span> with GPT Image supports multi-turn refinement. Upload a reference and iterate!
                         </p>
                       </div>
                     </div>
@@ -684,7 +777,7 @@ function App() {
                 <div className="mb-6 rounded-xl overflow-hidden bg-black flex justify-center">
                   <img
                     src={getImageUrl()}
-                    alt="Generated by GPT Image 1"
+                    alt="Generated by GPT Image 1.5"
                     className="max-w-full max-h-[600px] object-contain"
                   />
                 </div>
@@ -699,10 +792,47 @@ function App() {
                 Download Image
               </button>
 
+              {/* Refine Section */}
+              {imageData?.data && (
+                <div className="mt-6 pt-6 border-t border-white/10">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
+                    <RefreshCw className="w-4 h-4 text-violet-400" />
+                    Refine this image
+                  </label>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Describe changes to iterate on the generated image using multi-turn editing.
+                  </p>
+                  <textarea
+                    value={refinePrompt}
+                    onChange={(e) => setRefinePrompt(e.target.value)}
+                    placeholder="Describe changes... e.g., 'Make it more colorful' or 'Add a sunset background'"
+                    className="w-full h-20 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 resize-none transition-all"
+                    disabled={isRefining}
+                  />
+                  <button
+                    onClick={handleRefine}
+                    disabled={isRefining || !refinePrompt.trim()}
+                    className="mt-3 w-full py-3 rounded-xl font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-violet-600 to-pink-500 hover:from-violet-500 hover:to-pink-400 text-white flex items-center justify-center gap-2"
+                  >
+                    {isRefining ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Refining...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4" />
+                        Refine Image
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+
               {/* Image Info */}
               <div className="mt-4 pt-4 border-t border-white/10 text-sm text-gray-400">
                 <p><span className="text-gray-500">Prompt:</span> {prompt}</p>
-                <p className="mt-1"><span className="text-gray-500">Size:</span> {imageSize} • <span className="text-gray-500">Model:</span> GPT Image 1</p>
+                <p className="mt-1"><span className="text-gray-500">Size:</span> {imageSize} • <span className="text-gray-500">Model:</span> Responses API (GPT Image)</p>
                 {imageData?.revised_prompt && (
                   <p className="mt-1"><span className="text-gray-500">Revised Prompt:</span> {imageData.revised_prompt}</p>
                 )}
@@ -748,7 +878,7 @@ function App() {
 
       {/* Footer */}
       <footer className="relative z-10 py-8 px-4 text-center text-gray-500 text-sm">
-        <p>Built with ❤️ using Azure OpenAI Sora 2 & GPT Image 1 • EntraID Authentication</p>
+        <p>Built with ❤️ using Azure OpenAI Sora 2 & GPT Image 1.5 • EntraID Authentication</p>
       </footer>
     </div>
   );

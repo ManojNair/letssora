@@ -30,19 +30,10 @@ async function getAzureToken() {
   return tokenResponse.token;
 }
 
-// Create OpenAI client dynamically with fresh token
-// async function getOpenAIClient() {
-//   const token = await getAzureToken();
-//   return new OpenAI({
-//     baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
-//     apiKey: token
-//   });
-// }
-
 // Create OpenAI client with API key
 const openai = new OpenAI({
   baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
-  apiKey: await getAzureToken()
+  apiKey: AZURE_OPENAI_API_KEY ?? await getAzureToken()
 });
 
 app.use(cors());

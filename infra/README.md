@@ -58,11 +58,7 @@ az deployment group what-if \
   --parameters infra/main.bicepparam
 
 # Deploy the infrastructure
-az deployment group create \
-  --name letssora-deployment \
-  --resource-group rg-letssora-dev \
-  --template-file infra/main.bicep \
-  --parameters infra/main.bicepparam
+az deployment group create --name letssora-deployment --resource-group rg-letssora-dev --template-file infra/main.bicep --parameters infra/main.bicepparam
 ```
 
 ### Step 2: Deploy Application Code (Zip Deploy)
