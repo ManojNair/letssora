@@ -3,8 +3,10 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { DefaultAzureCredential } from '@azure/identity';
-import OpenAI from 'openai';
+import OpenAI, { toFile } from 'openai';
 import dotenv from 'dotenv';
+import { initCosmosDb, isDbAvailable, saveGeneration, getGenerations, getGeneration, deleteGeneration } from './db.js';
+import { initBlobStorage, isStorageAvailable, uploadMedia, deleteMedia } from './storage.js';
 
 dotenv.config();
 
@@ -15,10 +17,11 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Azure OpenAI configuration
-const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || 'https://letssoraprj-resource.openai.azure.com';
-const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || 'https://letssoraprj-resource.services.ai.azure.com';
+const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT;
+const AZURE_FOUNDRY_ENDPOINT = process.env.AZURE_FOUNDRY_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT;
 const SORA_MODEL = process.env.SORA_MODEL_DEPLOYMENT || 'sora-2';
-const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1';
+const IMAGE_MODEL = process.env.IMAGE_MODEL_DEPLOYMENT || 'gpt-image-1.5';
+const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY;
 
 // Initialize Azure credential
 const credential = new DefaultAzureCredential();
@@ -29,17 +32,20 @@ async function getAzureToken() {
   return tokenResponse.token;
 }
 
-// Create OpenAI client dynamically with fresh token
-async function getOpenAIClient() {
-  const token = await getAzureToken();
-  return new OpenAI({
-    baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
-    apiKey: token
-  });
-}
+// Create OpenAI client with API key
+const openai = new OpenAI({
+  baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/v1/`,
+  apiKey: AZURE_OPENAI_API_KEY ?? await getAzureToken()
+});
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+
+// Initialize storage backends (non-blocking)
+(async () => {
+  await initCosmosDb();
+  await initBlobStorage();
+})();
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -53,44 +59,170 @@ app.get('/api/health', (req, res) => {
     models: {
       video: SORA_MODEL,
       image: IMAGE_MODEL
+    },
+    storage: {
+      cosmosDb: isDbAvailable(),
+      blobStorage: isStorageAvailable()
     }
   });
 });
 
-// Generate image endpoint (GPT Image 1)
+// Helper: convert a base64 or data-URL string to a File object for the edit API
+async function base64ToFile(input, filename = 'image.png') {
+  const base64Data = input.startsWith('data:') ? input.split(',')[1] : input;
+  const imageBuffer = Buffer.from(base64Data, 'base64');
+  return toFile(imageBuffer, filename, { type: 'image/png' });
+}
+
+// Generate image endpoint (Image API)
 app.post('/api/generate-image', async (req, res) => {
   try {
-    const { prompt, size = '1024x1024' } = req.body;
+    const { prompt, size = 'auto', quality = 'auto', inputImages } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
 
+    const imageCount = Array.isArray(inputImages) ? inputImages.length : 0;
     console.log(`Generating image with prompt: "${prompt}"`);
-    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}`);
+    console.log(`Image size: ${size}, Model: ${IMAGE_MODEL}, Reference images: ${imageCount}`);
 
-    // Get OpenAI client with fresh token
-    const openai = await getOpenAIClient();
+    let result;
 
-    // Use OpenAI SDK for GPT Image 1
-    const result = await openai.images.generate({
-      model: IMAGE_MODEL,
-      prompt: prompt,
-      size: size,
-      n: 1,
-    });
+    if (inputImages && inputImages.length > 0) {
+      // Use images.edit when reference images are provided
+      // Convert all images to File objects
+      const imageFiles = await Promise.all(
+        inputImages.map((img, i) => base64ToFile(img, `reference-${i}.png`))
+      );
+
+      result = await openai.images.edit({
+        model: IMAGE_MODEL,
+        image: imageFiles.length === 1 ? imageFiles[0] : imageFiles,
+        prompt: prompt,
+        ...(size !== 'auto' && { size }),
+        quality,
+        input_fidelity: 'high',
+      });
+    } else {
+      // Use images.generate for text-only prompts
+      result = await openai.images.generate({
+        model: IMAGE_MODEL,
+        prompt: prompt,
+        ...(size !== 'auto' && { size }),
+        quality,
+        n: 1,
+      });
+    }
 
     console.log('Image generation response received');
+
+    const imageBase64 = result.data?.[0]?.b64_json;
+    const revisedPrompt = result.data?.[0]?.revised_prompt;
+
+    // Auto-save to history (non-blocking)
+    let savedId = null;
+    if (isDbAvailable() && imageBase64) {
+      try {
+        let mediaUrl = null;
+        if (isStorageAvailable()) {
+          mediaUrl = await uploadMedia(imageBase64, 'png', 'image/png');
+        }
+        const saved = await saveGeneration({
+          type: 'image',
+          prompt,
+          settings: { imageSize: size, quality },
+          groundingImageCount: imageCount,
+          result: { mediaUrl, revisedPrompt: revisedPrompt },
+        });
+        savedId = saved.id;
+        console.log('Generation saved to history:', savedId);
+      } catch (saveErr) {
+        console.error('Failed to save generation:', saveErr.message);
+      }
+    }
 
     res.json({
       status: 'completed',
       type: 'image',
-      data: result.data?.[0]?.b64_json,
-      revised_prompt: result.data?.[0]?.revised_prompt,
+      data: imageBase64,
+      revised_prompt: revisedPrompt,
+      savedId,
       _raw: result
     });
   } catch (error) {
     console.error('Error generating image:', error);
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    });
+  }
+});
+
+// Edit/refine image endpoint (Image API - images.edit)
+app.post('/api/refine-image', async (req, res) => {
+  try {
+    const { prompt, previousImage, size = 'auto', quality = 'auto' } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+
+    if (!previousImage) {
+      return res.status(400).json({ error: 'Previous image data is required for refinement' });
+    }
+
+    console.log(`Refining image with prompt: "${prompt}"`);
+
+    // Convert the previous image to a file
+    const sourceFile = await base64ToFile(previousImage, 'source.png');
+
+    const result = await openai.images.edit({
+      model: IMAGE_MODEL,
+      image: sourceFile,
+      prompt: prompt,
+      ...(size !== 'auto' && { size }),
+      quality,
+      input_fidelity: "high"
+    });
+
+    console.log('Image refinement response received');
+
+    const refinedBase64 = result.data?.[0]?.b64_json;
+    const refinedPrompt = result.data?.[0]?.revised_prompt;
+
+    // Auto-save refinement to history (non-blocking)
+    let savedId = null;
+    if (isDbAvailable() && refinedBase64) {
+      try {
+        let mediaUrl = null;
+        if (isStorageAvailable()) {
+          mediaUrl = await uploadMedia(refinedBase64, 'png', 'image/png');
+        }
+        const saved = await saveGeneration({
+          type: 'image',
+          prompt: `[Refined] ${prompt}`,
+          settings: { imageSize: size, quality },
+          groundingImageCount: 1,
+          result: { mediaUrl, revisedPrompt: refinedPrompt },
+        });
+        savedId = saved.id;
+        console.log('Refinement saved to history:', savedId);
+      } catch (saveErr) {
+        console.error('Failed to save refinement:', saveErr.message);
+      }
+    }
+
+    res.json({
+      status: 'completed',
+      type: 'image',
+      data: refinedBase64,
+      revised_prompt: refinedPrompt,
+      savedId,
+      _raw: result
+    });
+  } catch (error) {
+    console.error('Error refining image:', error);
     res.status(500).json({ 
       error: 'Internal server error', 
       message: error.message 
@@ -109,15 +241,12 @@ app.post('/api/generate-video', async (req, res) => {
 
     console.log(`Generating video with prompt: "${prompt}"`);
 
-    // Get Azure AD token
-    const token = await getAzureToken();
-
     // Call Azure OpenAI Sora API
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+        'api-key': AZURE_OPENAI_API_KEY
       },
       body: JSON.stringify({
         prompt,
@@ -157,12 +286,11 @@ app.post('/api/generate-video', async (req, res) => {
 app.get('/api/video-status/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const token = await getAzureToken();
 
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${token}`
+        'api-key': AZURE_OPENAI_API_KEY
       }
     });
 
@@ -184,7 +312,7 @@ app.get('/api/video-status/:id', async (req, res) => {
         const generationsResponse = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}/content`, {
           method: 'GET',
           headers: {
-            'Authorization': `Bearer ${token}`
+            'api-key': AZURE_OPENAI_API_KEY
           }
         });
         
@@ -224,12 +352,11 @@ app.get('/api/video-status/:id', async (req, res) => {
 app.get('/api/video-content/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const token = await getAzureToken();
 
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}/content`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${token}`
+        'api-key': AZURE_OPENAI_API_KEY
       }
     });
 
@@ -274,13 +401,12 @@ app.get('/api/download-video', async (req, res) => {
     // First try without auth (for SAS URLs or public URLs)
     let response = await fetch(url);
     
-    // If unauthorized, try with Azure token
+    // If unauthorized, try with API key
     if (response.status === 401 || response.status === 403) {
-      console.log('Trying with Azure token...');
-      const token = await getAzureToken();
+      console.log('Trying with API key...');
       response = await fetch(url, {
         headers: {
-          'Authorization': `Bearer ${token}`
+          'api-key': AZURE_OPENAI_API_KEY
         }
       });
     }
@@ -337,6 +463,98 @@ app.post('/api/save-video', async (req, res) => {
       error: 'Internal server error', 
       message: error.message 
     });
+  }
+});
+
+// Save a completed video generation to history
+app.post('/api/save-generation', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.status(503).json({ error: 'History storage not available' });
+    }
+
+    const { type, prompt, settings, mediaData, mediaExtension, mediaContentType } = req.body;
+
+    let mediaUrl = null;
+    if (isStorageAvailable() && mediaData) {
+      mediaUrl = await uploadMedia(mediaData, mediaExtension || 'mp4', mediaContentType || 'video/mp4');
+    }
+
+    const saved = await saveGeneration({
+      type: type || 'video',
+      prompt,
+      settings: settings || {},
+      result: { mediaUrl },
+    });
+
+    res.json({ id: saved.id, mediaUrl });
+  } catch (error) {
+    console.error('Error saving generation:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// ──────────────── History API ────────────────
+
+// List generations
+app.get('/api/generations', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.json({ generations: [], message: 'History storage not available' });
+    }
+
+    const limit = parseInt(req.query.limit) || 50;
+    const continuationToken = req.query.continuationToken || undefined;
+    const result = await getGenerations('default', limit, continuationToken);
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching generations:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Get single generation
+app.get('/api/generations/:id', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.status(503).json({ error: 'History storage not available' });
+    }
+
+    const item = await getGeneration(req.params.id);
+    if (!item) {
+      return res.status(404).json({ error: 'Generation not found' });
+    }
+    res.json(item);
+  } catch (error) {
+    console.error('Error fetching generation:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Delete generation
+app.delete('/api/generations/:id', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.status(503).json({ error: 'History storage not available' });
+    }
+
+    // Get the item first to delete associated media
+    const item = await getGeneration(req.params.id);
+    if (!item) {
+      return res.status(404).json({ error: 'Generation not found' });
+    }
+
+    // Delete media from blob storage
+    if (item.result?.mediaUrl) {
+      await deleteMedia(item.result.mediaUrl);
+    }
+
+    // Delete from Cosmos DB
+    await deleteGeneration(req.params.id);
+    res.json({ message: 'Deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting generation:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
 

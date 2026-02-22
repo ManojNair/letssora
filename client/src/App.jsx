@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Sparkles, 
@@ -15,8 +15,14 @@ import {
   Image,
   Film,
   Upload,
-  X
+  X,
+  History,
+  Trash2,
+  PanelLeftOpen,
+  PanelLeftClose,
+  Clipboard
 } from 'lucide-react';
+import HistorySidebar from './components/HistorySidebar';
 
 // Particle background component
 const ParticleBackground = () => {
@@ -93,6 +99,13 @@ function App() {
   const [groundingImages, setGroundingImages] = useState([]);
   const [refinePrompt, setRefinePrompt] = useState('');
   const [isRefining, setIsRefining] = useState(false);
+  const [pasteNotification, setPasteNotification] = useState(false);
+
+  // History state
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyItems, setHistoryItems] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [selectedHistoryItem, setSelectedHistoryItem] = useState(null);
 
   // Poll for video status
   useEffect(() => {
@@ -111,6 +124,22 @@ function App() {
             setVideoData(prev => ({ ...prev, ...data }));
             setStatus('completed');
             clearInterval(interval);
+
+            // Auto-save video to history
+            try {
+              await fetch('/api/save-generation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  type: 'video',
+                  prompt: prompt,
+                  settings: { size, seconds },
+                }),
+              });
+              fetchHistory();
+            } catch (saveErr) {
+              console.error('Failed to save video to history:', saveErr);
+            }
           } else if (data.status === 'failed') {
             const errorMsg = data.error?.message || data.error || 'Video generation failed';
             setError(errorMsg);
@@ -176,6 +205,8 @@ function App() {
         console.log('Image API Response:', data);
         setImageData(data);
         setStatus('completed');
+        // Refresh history after successful image generation
+        fetchHistory();
       } else {
         // Video generation with Sora 2
         const response = await fetch('/api/generate-video', {
@@ -328,6 +359,102 @@ function App() {
     setGroundingImages([]);
   };
 
+  // Handle paste event on textarea — add clipboard images to grounding images
+  const handlePaste = useCallback((e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const imageItems = Array.from(items).filter(item => item.type.startsWith('image/'));
+    if (imageItems.length === 0) return;
+
+    e.preventDefault();
+
+    // Auto-switch to image mode since grounding images are image-mode only
+    if (generationMode !== 'image') {
+      setGenerationMode('image');
+    }
+
+    imageItems.forEach((item) => {
+      const file = item.getAsFile();
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setGroundingImages((prev) => [...prev, reader.result]);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    // Show paste notification
+    setPasteNotification(true);
+    setTimeout(() => setPasteNotification(false), 2000);
+  }, [generationMode]);
+
+  // Fetch history from server
+  const fetchHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const response = await fetch('/api/generations?limit=50');
+      if (response.ok) {
+        const data = await response.json();
+        setHistoryItems(data.generations || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch history:', err);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  // Load history on mount and when sidebar opens
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
+
+  const handleDeleteHistoryItem = async (id, e) => {
+    e.stopPropagation();
+    try {
+      const response = await fetch(`/api/generations/${id}`, { method: 'DELETE' });
+      if (response.ok) {
+        setHistoryItems(prev => prev.filter(item => item.id !== id));
+        if (selectedHistoryItem?.id === id) {
+          setSelectedHistoryItem(null);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to delete:', err);
+    }
+  };
+
+  const handleSelectHistoryItem = async (item) => {
+    try {
+      const response = await fetch(`/api/generations/${item.id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setSelectedHistoryItem(data);
+        setPrompt(data.prompt || '');
+        setGenerationMode(data.type || 'image');
+
+        if (data.type === 'image' && data.result?.mediaUrl) {
+          setImageData({ url: data.result.mediaUrl, revised_prompt: data.result.revisedPrompt });
+          setVideoData(null);
+          setStatus('completed');
+        } else if (data.type === 'video' && data.result?.mediaUrl) {
+          setVideoData({ url: data.result.mediaUrl, status: 'completed' });
+          setImageData(null);
+          setStatus('completed');
+        }
+
+        if (data.settings) {
+          if (data.settings.imageSize) setImageSize(data.settings.imageSize);
+          if (data.settings.size) setSize(data.settings.size);
+          if (data.settings.seconds) setSeconds(data.settings.seconds);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load history item:', err);
+    }
+  };
+
   const handleRefine = async () => {
     if (!refinePrompt.trim() || !imageData?.data) return;
     
@@ -360,6 +487,8 @@ function App() {
       console.log('Refine API Response:', data);
       setImageData(data);
       setRefinePrompt('');
+      // Refresh history after successful refinement
+      fetchHistory();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -424,6 +553,31 @@ function App() {
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white relative">
       <ParticleBackground />
+
+      {/* History Sidebar */}
+      <HistorySidebar
+        isOpen={showHistory}
+        onClose={() => setShowHistory(false)}
+        items={historyItems}
+        loading={historyLoading}
+        onSelect={handleSelectHistoryItem}
+        onDelete={handleDeleteHistoryItem}
+        onRefresh={fetchHistory}
+        selectedId={selectedHistoryItem?.id}
+      />
+
+      {/* Sidebar overlay */}
+      <AnimatePresence>
+        {showHistory && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-40"
+            onClick={() => setShowHistory(false)}
+          />
+        )}
+      </AnimatePresence>
       
       {/* Header */}
       <header className="relative z-10 py-6 px-4 sm:px-6 lg:px-8">
@@ -434,6 +588,13 @@ function App() {
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.5 }}
           >
+            <button
+              onClick={() => { setShowHistory(!showHistory); if (!showHistory) fetchHistory(); }}
+              className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+              title={showHistory ? 'Close history' : 'Open history'}
+            >
+              {showHistory ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
+            </button>
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-pink-500 flex items-center justify-center">
               <Play className="w-5 h-5 text-white fill-white" />
             </div>
@@ -515,7 +676,7 @@ function App() {
           </div>
 
           {/* Prompt Input */}
-          <div className="mb-6">
+          <div className="mb-6 relative">
             <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
               <Sparkles className="w-4 h-4 text-violet-400" />
               Describe your {generationMode === 'video' ? 'video' : 'image'}
@@ -523,12 +684,28 @@ function App() {
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              onPaste={handlePaste}
               placeholder={generationMode === 'video' 
                 ? "A majestic eagle soaring through golden clouds at sunset, cinematic lighting, ultra realistic..."
-                : "A cute baby polar bear playing in the snow, soft lighting, photorealistic..."}
-              className="w-full h-32 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 resize-none transition-all"
+                : "A cute baby polar bear playing in the snow, soft lighting, photorealistic... (paste images here!)"}
+              className={`w-full h-32 bg-black/30 border rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 resize-none transition-all ${
+                pasteNotification ? 'border-green-500/50 ring-2 ring-green-500/20' : 'border-white/10'
+              }`}
               disabled={isGenerating || status === 'polling'}
             />
+            <AnimatePresence>
+              {pasteNotification && (
+                <motion.div
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute bottom-2 right-3 flex items-center gap-1.5 text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded-md"
+                >
+                  <Clipboard className="w-3 h-3" />
+                  Image pasted!
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
 
           {/* Grounding Image Upload - Image Mode Only */}

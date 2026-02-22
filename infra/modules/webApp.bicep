@@ -15,7 +15,7 @@ param appServicePlanId string
 param tags object = {}
 
 @description('The Node.js version to use')
-param nodeVersion string = '20-lts'
+param nodeVersion string = '22-lts'
 
 @description('Azure OpenAI/Foundry endpoint URL')
 param azureOpenAiEndpoint string = ''
@@ -57,7 +57,7 @@ resource webApp 'Microsoft.Web/sites@2024-11-01' = {
         // Node.js configuration
         {
           name: 'WEBSITE_NODE_DEFAULT_VERSION'
-          value: '~20'
+          value: '~22'
         }
         {
           name: 'NODE_ENV'

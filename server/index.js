@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import { DefaultAzureCredential } from '@azure/identity';
 import OpenAI, { toFile } from 'openai';
 import dotenv from 'dotenv';
+import { initCosmosDb, isDbAvailable, saveGeneration, getGenerations, getGeneration, deleteGeneration } from './db.js';
+import { initBlobStorage, isStorageAvailable, uploadMedia, deleteMedia } from './storage.js';
 
 dotenv.config();
 
@@ -39,6 +41,12 @@ const openai = new OpenAI({
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Initialize storage backends (non-blocking)
+(async () => {
+  await initCosmosDb();
+  await initBlobStorage();
+})();
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ 
@@ -51,9 +59,22 @@ app.get('/api/health', (req, res) => {
     models: {
       video: SORA_MODEL,
       image: IMAGE_MODEL
+    },
+    storage: {
+      cosmosDb: isDbAvailable(),
+      blobStorage: isStorageAvailable()
     }
   });
 });
+
+// Helper: build auth headers for direct REST calls (video endpoints)
+async function getAuthHeaders() {
+  if (AZURE_OPENAI_API_KEY) {
+    return { 'api-key': AZURE_OPENAI_API_KEY };
+  }
+  const token = await getAzureToken();
+  return { 'Authorization': `Bearer ${token}` };
+}
 
 // Helper: convert a base64 or data-URL string to a File object for the edit API
 async function base64ToFile(input, filename = 'image.png') {
@@ -105,11 +126,37 @@ app.post('/api/generate-image', async (req, res) => {
 
     console.log('Image generation response received');
 
+    const imageBase64 = result.data?.[0]?.b64_json;
+    const revisedPrompt = result.data?.[0]?.revised_prompt;
+
+    // Auto-save to history (non-blocking)
+    let savedId = null;
+    if (isDbAvailable() && imageBase64) {
+      try {
+        let mediaUrl = null;
+        if (isStorageAvailable()) {
+          mediaUrl = await uploadMedia(imageBase64, 'png', 'image/png');
+        }
+        const saved = await saveGeneration({
+          type: 'image',
+          prompt,
+          settings: { imageSize: size, quality },
+          groundingImageCount: imageCount,
+          result: { mediaUrl, revisedPrompt: revisedPrompt },
+        });
+        savedId = saved.id;
+        console.log('Generation saved to history:', savedId);
+      } catch (saveErr) {
+        console.error('Failed to save generation:', saveErr.message);
+      }
+    }
+
     res.json({
       status: 'completed',
       type: 'image',
-      data: result.data?.[0]?.b64_json,
-      revised_prompt: result.data?.[0]?.revised_prompt,
+      data: imageBase64,
+      revised_prompt: revisedPrompt,
+      savedId,
       _raw: result
     });
   } catch (error) {
@@ -150,11 +197,37 @@ app.post('/api/refine-image', async (req, res) => {
 
     console.log('Image refinement response received');
 
+    const refinedBase64 = result.data?.[0]?.b64_json;
+    const refinedPrompt = result.data?.[0]?.revised_prompt;
+
+    // Auto-save refinement to history (non-blocking)
+    let savedId = null;
+    if (isDbAvailable() && refinedBase64) {
+      try {
+        let mediaUrl = null;
+        if (isStorageAvailable()) {
+          mediaUrl = await uploadMedia(refinedBase64, 'png', 'image/png');
+        }
+        const saved = await saveGeneration({
+          type: 'image',
+          prompt: `[Refined] ${prompt}`,
+          settings: { imageSize: size, quality },
+          groundingImageCount: 1,
+          result: { mediaUrl, revisedPrompt: refinedPrompt },
+        });
+        savedId = saved.id;
+        console.log('Refinement saved to history:', savedId);
+      } catch (saveErr) {
+        console.error('Failed to save refinement:', saveErr.message);
+      }
+    }
+
     res.json({
       status: 'completed',
       type: 'image',
-      data: result.data?.[0]?.b64_json,
-      revised_prompt: result.data?.[0]?.revised_prompt,
+      data: refinedBase64,
+      revised_prompt: refinedPrompt,
+      savedId,
       _raw: result
     });
   } catch (error) {
@@ -178,11 +251,12 @@ app.post('/api/generate-video', async (req, res) => {
     console.log(`Generating video with prompt: "${prompt}"`);
 
     // Call Azure OpenAI Sora API
+    const authHeaders = await getAuthHeaders();
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'api-key': AZURE_OPENAI_API_KEY
+        ...authHeaders
       },
       body: JSON.stringify({
         prompt,
@@ -223,11 +297,10 @@ app.get('/api/video-status/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
+    const authHeaders = await getAuthHeaders();
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}`, {
       method: 'GET',
-      headers: {
-        'api-key': AZURE_OPENAI_API_KEY
-      }
+      headers: authHeaders
     });
 
     if (!response.ok) {
@@ -247,9 +320,7 @@ app.get('/api/video-status/:id', async (req, res) => {
       try {
         const generationsResponse = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}/content`, {
           method: 'GET',
-          headers: {
-            'api-key': AZURE_OPENAI_API_KEY
-          }
+          headers: authHeaders
         });
         
         if (generationsResponse.ok) {
@@ -289,11 +360,10 @@ app.get('/api/video-content/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
+    const authHeaders = await getAuthHeaders();
     const response = await fetch(`${AZURE_OPENAI_ENDPOINT}/openai/v1/videos/${id}/content`, {
       method: 'GET',
-      headers: {
-        'api-key': AZURE_OPENAI_API_KEY
-      }
+      headers: authHeaders
     });
 
     if (!response.ok) {
@@ -337,13 +407,12 @@ app.get('/api/download-video', async (req, res) => {
     // First try without auth (for SAS URLs or public URLs)
     let response = await fetch(url);
     
-    // If unauthorized, try with API key
+    // If unauthorized, try with auth headers
     if (response.status === 401 || response.status === 403) {
-      console.log('Trying with API key...');
+      console.log('Trying with auth headers...');
+      const authHeaders = await getAuthHeaders();
       response = await fetch(url, {
-        headers: {
-          'api-key': AZURE_OPENAI_API_KEY
-        }
+        headers: authHeaders
       });
     }
 
@@ -399,6 +468,98 @@ app.post('/api/save-video', async (req, res) => {
       error: 'Internal server error', 
       message: error.message 
     });
+  }
+});
+
+// Save a completed video generation to history
+app.post('/api/save-generation', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.status(503).json({ error: 'History storage not available' });
+    }
+
+    const { type, prompt, settings, mediaData, mediaExtension, mediaContentType } = req.body;
+
+    let mediaUrl = null;
+    if (isStorageAvailable() && mediaData) {
+      mediaUrl = await uploadMedia(mediaData, mediaExtension || 'mp4', mediaContentType || 'video/mp4');
+    }
+
+    const saved = await saveGeneration({
+      type: type || 'video',
+      prompt,
+      settings: settings || {},
+      result: { mediaUrl },
+    });
+
+    res.json({ id: saved.id, mediaUrl });
+  } catch (error) {
+    console.error('Error saving generation:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// ──────────────── History API ────────────────
+
+// List generations
+app.get('/api/generations', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.json({ generations: [], message: 'History storage not available' });
+    }
+
+    const limit = parseInt(req.query.limit) || 50;
+    const continuationToken = req.query.continuationToken || undefined;
+    const result = await getGenerations('default', limit, continuationToken);
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching generations:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Get single generation
+app.get('/api/generations/:id', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.status(503).json({ error: 'History storage not available' });
+    }
+
+    const item = await getGeneration(req.params.id);
+    if (!item) {
+      return res.status(404).json({ error: 'Generation not found' });
+    }
+    res.json(item);
+  } catch (error) {
+    console.error('Error fetching generation:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Delete generation
+app.delete('/api/generations/:id', async (req, res) => {
+  try {
+    if (!isDbAvailable()) {
+      return res.status(503).json({ error: 'History storage not available' });
+    }
+
+    // Get the item first to delete associated media
+    const item = await getGeneration(req.params.id);
+    if (!item) {
+      return res.status(404).json({ error: 'Generation not found' });
+    }
+
+    // Delete media from blob storage
+    if (item.result?.mediaUrl) {
+      await deleteMedia(item.result.mediaUrl);
+    }
+
+    // Delete from Cosmos DB
+    await deleteGeneration(req.params.id);
+    res.json({ message: 'Deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting generation:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
 

@@ -29,7 +29,11 @@ flowchart TB
         ImageGenAPI[POST /api/generate-image]
         VideoStatusAPI[GET /api/video-status/:id]
         VideoContentAPI[GET /api/video-content/:id]
+        HistoryAPI[GET/DELETE /api/generations]
+        SaveGenAPI[POST /api/save-generation]
         AuthModule[Auth Module<br/>DefaultAzureCredential]
+        DbModule[db.js<br/>Cosmos DB Client]
+        StorageModule[storage.js<br/>Blob Storage Client]
     end
 
     subgraph AzureServices["☁️ Azure Services"]
@@ -43,6 +47,9 @@ flowchart TB
         subgraph AIFoundry["Azure AI Foundry"]
             FluxModel[Flux 2 Pro Model<br/>Image Generation]
         end
+
+        CosmosDB[Azure Cosmos DB<br/>NoSQL - Serverless]
+        BlobStorage[Azure Blob Storage<br/>Media Files]
     end
 
     Browser --> App
@@ -67,8 +74,16 @@ flowchart TB
     
     ImageGenAPI -->|Sync Request| FluxModel
     
+    HistoryAPI --> DbModule
+    SaveGenAPI --> DbModule
+    SaveGenAPI --> StorageModule
+    DbModule --> CosmosDB
+    StorageModule --> BlobStorage
+    
     EntraID -.->|Bearer Token| SoraModel
     EntraID -.->|Bearer Token| FluxModel
+    EntraID -.->|Bearer Token| CosmosDB
+    EntraID -.->|Bearer Token| BlobStorage
 ```
 
 ## Data Flow
@@ -155,8 +170,9 @@ graph TB
         
         subgraph UI["UI Components"]
             Header[Header + Title]
+            HistorySidebar[History Sidebar]
             ModeToggle[Mode Toggle]
-            PromptArea[Prompt Text Area]
+            PromptArea[Prompt Text Area<br/>+ Image Paste]
             SettingsSection[Settings Section]
             GenerateBtn[Generate Button]
             ResultViewer[Result Viewer]
@@ -177,6 +193,8 @@ graph TB
 | Styling | Tailwind CSS | Rapid prototyping, consistent design |
 | Animations | Framer Motion | Smooth, declarative animations |
 | Backend | Express.js | Simple, flexible, well-documented |
+| Database | Azure Cosmos DB (NoSQL, Serverless) | Low-latency, auto-scale, serverless billing |
+| Media Storage | Azure Blob Storage | Scalable, cost-effective for images/videos |
 | Authentication | @azure/identity | Official SDK, supports multiple auth methods |
 | HTTP Client | Fetch API | Native, no dependencies needed |
 
@@ -219,3 +237,7 @@ graph LR
 | `AZURE_FOUNDRY_ENDPOINT` | Azure AI Foundry endpoint | `https://xxx.services.ai.azure.com` |
 | `FLUX_MODEL_DEPLOYMENT` | Flux deployment name | `FLUX.2-pro` |
 | `PORT` | Backend server port | `3001` |
+| `COSMOS_DB_ENDPOINT` | Cosmos DB account endpoint | `https://cosmos-letssora-dev.documents.azure.com:443/` |
+| `COSMOS_DB_DATABASE` | Cosmos DB database name | `letssora` |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Blob Storage account name | `stletssoradev` |
+| `AZURE_STORAGE_CONTAINER_NAME` | Blob container name | `media` |

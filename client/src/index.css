@@ -113,3 +113,25 @@ body {
     opacity: 0;
   }
 }
+
+/* History sidebar */
+.history-sidebar {
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+}
+
+.history-sidebar .custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.history-sidebar .custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-sidebar .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.3);
+  border-radius: 2px;
+}
+
+.history-sidebar .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.5);
+}
